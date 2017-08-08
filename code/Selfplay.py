@@ -9,10 +9,7 @@ from Engine import IdiotEngine, StrongerEngine
 def run_self_play_game(engine1, engine2, N=5, show=False):
     board = Board(N)
 
-    engine1.set_board_size(N)
     engine1.clear_board()
-
-    engine2.set_board_size(N)
     engine2.clear_board()
 
     while (board.check_game_end() == False):
@@ -24,7 +21,7 @@ def run_self_play_game(engine1, engine2, N=5, show=False):
         else:
             (x, y, d, color) = engine2.pick_move(board.color_to_play)
 
-
+        #print("Selfplay: ", x, y, d, color)
         board.make_move(x, y, d, color)
         engine1.move_played(x, y, d, color)
         engine2.move_played(x, y, d, color)
@@ -37,10 +34,10 @@ def run_self_play_game(engine1, engine2, N=5, show=False):
 
 
 def test_self_play():
-    engine1 = IdiotEngine()
-    engine2 = StrongerEngine()
+    engine1 = IdiotEngine(5)
+    engine2 = StrongerEngine(5)
 
-    board= run_self_play_game(engine1, engine2)
+    board= run_self_play_game(engine1, engine2, show=True)
     print("Final scores: ", board.score[Color.Black], board.score[Color.White])
 
 

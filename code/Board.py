@@ -10,6 +10,10 @@ class Color:
     Black = 0
     White = 1
 
+class Direction:
+    Horizontal = 0
+    Vertical = 1
+
 
 color_names = {Color.Black:"Black", Color.White:"White", }
 
@@ -23,13 +27,13 @@ class Board:
     def __init__(self, N):
         self.N = N
         self.num_dirs = 4
-        self.empty_edges = N * (N + 1) * 2
-        self.dirs = [(-1, 0), (0, 1), (1, 0), (0, -1)]
+        self.move_dirs = 2
         self.clear()
 
     def clear(self):
-        self.edges = np.empty((self.N, self.N, self.num_dirs), dtype=np.int8)
+        self.edges = np.empty((self.N + 1, self.N + 1, 2), dtype=np.int8)
         self.edges.fill(State.Empty)
+        self.empty_edges = self.N * (self.N + 1) * 2
         self.move_list = []
         self.score = {Color.Black: 0, Color.White: 0}
         self.color_to_play = Color.Black
@@ -38,26 +42,27 @@ class Board:
         return self.edges[index]
 
     def is_on_board(self, x, y, dir):
-        return 0 <= x and x < self.N and 0 <= y and y < self.N and 0 <= dir and dir < self.num_dirs
+        if (dir == None):
+            return (0 <= x) and (x < self.N) and (0 <= y) and (y < self.N)
+        if (dir == Direction.Vertical):
+            return (0 <= x) and (x < self.N) and (0 <= y) and (y < self.N + 1)
+        elif (dir == Direction.Horizontal):
+            return (0 <= x) and (x < self.N + 1) and (0 <= y) and (y < self.N)
+        else:
+            return False
 
-    def find_share_edge(self, x, y, dir):
-        none = (None, None, None)
-        if (x == 0 and dir == 0): return none
-        if (y == 0 and dir == 3): return none
-        if (x == self.N - 1 and dir == 2): return none
-        if (y == self.N - 1 and dir == 1): return none
-
-        if (dir == 0): return (x - 1, y, 2)
-        if (dir == 1): return (x, y + 1, 3)
-        if (dir == 2): return (x + 1, y, 0)
-        if (dir == 3): return (x, y - 1, 1)
-        return none
 
     def count_fenced(self, x, y):
-        sum = 0
-        for d in range(0, self.num_dirs):
-            sum = sum + self.edges[x, y, d]
-        return sum
+        return self.edges[x, y, Direction.Horizontal] + self.edges[x + 1, y, Direction.Horizontal]\
+               + self.edges[x, y, Direction.Vertical] + self.edges[x, y + 1, Direction.Vertical]
+
+    def find_share_grid(self, x, y, dir):
+        if (dir == Direction.Horizontal):
+            return x - 1, y
+        elif (dir == Direction.Vertical):
+            return x, y - 1
+        else:
+            return None, None
 
     def check_game_end(self):
         return (self.empty_edges == 0) or (self.score[Color.Black] * 2 > self.N * self.N) or ((self.score[Color.White] * 2 > self.N * self.N))
@@ -68,26 +73,28 @@ class Board:
         if (not self.is_on_board(x, y, dir)): return False
         if (self.edges[x, y, dir] != State.Empty): return False
 
-        (nx, ny, nd) = self.find_share_edge(x, y, dir)
-
 
         if (actually_execute):
             self.move_list.append([x, y, dir])
             self.edges[x, y, dir] = State.Occupied
             self.empty_edges = self.empty_edges - 1
 
-            count = self.count_fenced(x, y)
             flip = True
-            if (count == self.num_dirs):
-                flip = False
-                self.score[color] += 1
 
-            if (nx != None):
-                self.edges[nx, ny, nd] = State.Occupied
+            if (self.is_on_board(x, y, None)):
+                count = self.count_fenced(x, y)
+                if (count == self.num_dirs):
+                    flip = False
+                    self.score[color] += 1
+
+            nx, ny = self.find_share_grid(x, y, dir)
+
+
+            if (self.is_on_board(nx, ny, None)):
                 count = self.count_fenced(nx, ny)
                 if (count == self.num_dirs):
-                    self.score[color] += 1
                     flip = False
+                    self.score[color] += 1
 
             if (flip == True):
                 self.color_to_play = flipped_color[color]
@@ -114,14 +121,14 @@ class Board:
         for x in range(self.N + 1):
             if (x < self.N):
                 for y in range(self.N):
-                    print("+"+state_strings[0, self.edges[x, y, 0]], end="")
+                    print("+"+state_strings[0, self.edges[x, y, Direction.Horizontal]], end="")
                 print("+")
                 for y in range(self.N):
-                    print(state_strings[1, self.edges[x, y, 3]]+"  ", end="")
-                print(state_strings[1, self.edges[x, self.N - 1, 1]])
+                    print(state_strings[1, self.edges[x, y, Direction.Vertical]]+"  ", end="")
+                print(state_strings[1, self.edges[x, self.N, Direction.Vertical]])
             else:
                 for y in range(self.N):
-                    print("+"+state_strings[0, self.edges[x - 1, y, 2]], end="")
+                    print("+"+state_strings[0, self.edges[x, y, Direction.Horizontal]], end="")
                 print("+")
 
 
@@ -138,7 +145,9 @@ def show_sequence(board, moves, first_color):
 
 def test_Board():
     board = Board(5)
-    show_sequence(board, [(0, 0, 1), (0, 0, 0), (0, 0, 2), (0, 0, 3), (2, 2, 0),(2, 2, 1),(2, 2, 2),(2, 2, 3)], Color.Black)
+    show_sequence(board, [(0, 0, 1), (0, 0, 0), (0, 1, 1), (1, 0, 0),
+                          (2, 2, 0),(2, 2, 1),(3, 2, 0),(2, 3, 0),
+                          (2, 4, 1), (3, 3, 0), (2, 3, 1)], Color.Black)
 
 
 

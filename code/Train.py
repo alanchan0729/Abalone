@@ -22,9 +22,21 @@ from Engine import *
 from NNEngine import *
 from Board import *
 
+save_size = 150
 
-def train_step(total_loss, learning_rate, momentum=None):
-    return tf.train.MomentumOptimizer(learning_rate, momentum).minimize(total_loss)
+def train_step(total_loss, learning_rate, outcome_op, grad_cap):
+    #return tf.train.MomentumOptimizer(learning_rate, momentum).minimize(total_loss)
+
+    opt = tf.train.GradientDescentOptimizer(learning_rate=learning_rate)
+    grads_vars = opt.compute_gradients(total_loss, tf.trainable_variables())
+    outcome = tf.reduce_mean(outcome_op)
+
+    dir_grads_vars = [(tf.multiply(tf.clip_by_value(grad, -grad_cap, grad_cap), outcome), var) for grad, var in grads_vars]
+
+
+    #dir_grads_vars = [[tf.multiply(gv[0], outcome), gv[1]] for gv in grads_vars]
+
+    return opt.apply_gradients(dir_grads_vars), grads_vars, dir_grads_vars
 
 
 def make_summary(name, val):
@@ -70,64 +82,58 @@ class MovingAverage:
 
 
 def loss_func(output_op):
-    label_op = tf.placeholder(tf.float32, shape=[None])
-    outcome_op = tf.placeholder(tf.float32)
+    label_op = tf.placeholder(tf.int64, shape=[None])
+    outcome_op = tf.placeholder(tf.float32, shape=[None])
 
-    #squared_errors = tf.square(tf.reshape(score_op, [-1]) - final_scores)
-    #mean_sq_err = tf.reduce_mean(squared_errors, name='mean_sq_err')
-    #cross_entropy_ish_loss = tf.reduce_mean(-tf.log(tf.constant(1.0) - tf.constant(0.5) * tf.abs(tf.reshape(score_op, [-1]) - final_scores), name='cross-entropy-ish-loss'))
+    cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=output_op, labels=label_op)
+    cross_entropy_err = tf.reduce_mean(cross_entropy, name='cross_entropy_mean')
 
-    #correct_prediction = tf.equal(tf.sign(tf.reshape(score_op, [-1])), tf.sign(final_scores))
-    #accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32), name='accuracy')
-    #return final_scores, mean_sq_err, accuracy, squared_errors
-    cross_entropy_err = tf.multiply(tf.nn.softmax_cross_entropy_with_logits(logits=output_op, labels=label_op), outcome_op)
     return cross_entropy_err, label_op, outcome_op
 
 
-def run_validation(step):
+def run_validation(step, engine_strength):
     # play 100 games with different level of AI / previous version NN
     print("Run validation")
     win = 0
-    for i in range(100):
-        nnengine = NNEngine("NNEngine", model, step)
+    nnengine = NNEngine("NNEngine", model, step)
+    stronger_engine = StrongerEngine(model.N, engine_strength)
+    num_games = 50
+
+    for i in range(num_games):
+        nnengine.clear_board()
+        stronger_engine.clear_board()
         if (i % 2 == 0):
-            board = Selfplay.run_self_play_game(nnengine, StrongerEngine())
+            board = Selfplay.run_self_play_game(nnengine, stronger_engine)
             if (board.score[Color.Black] > board.score[Color.White]):
                 win = win + 1
         else:
-            board = Selfplay.run_self_play_game(StrongerEngine(), nnengine)
+            board = Selfplay.run_self_play_game(stronger_engine, nnengine)
             if (board.score[Color.Black] < board.score[Color.White]):
                 win = win + 1
-    print("Play against stronger AI: %d/100" % win)
+    print("Play against %s: %d/%d" % (stronger_engine.name(), win, num_games))
 
-    # play against 5000 steps before
-    win = 0
-    for i in range(100):
-        nnengine = NNEngine("NNEngine", model, step)
-        nnengine2 = NNEngine("NNEngine2", model, max(0, step - 5000))
-        if (i % 2 == 0):
-            board = Selfplay.run_self_play_game(nnengine, nnengine2)
-            if (board.score[Color.Black] > board.score[Color.White]):
-                win = win + 1
-        else:
-            board = Selfplay.run_self_play_game(nnengine2, nnengine)
-            if (board.score[Color.Black] < board.score[Color.White]):
-                win = win + 1
-    print("Play against 5000 steps before: %d/100" % win)
+    return (win / num_games)
 
 
-def create_self_play_data(step, model, feature_planes, label_op, outcome_op):
+def create_self_play_data(model, feature_planes, label_op, outcome_op, list_prv_model):
+
+
 
     feed_dict = []
-
-    nnengine = NNEngine("NNEngine", model, step)
-    probs = [0.7, 0.2, 0.08, 0.02]
+    cur_step = int(list_prv_model[-1].split('/')[-1].split('-')[-1])
+    nnengine = NNEngine("NNEngine", model, cur_step)
+    num_prev_version = len(list_prv_model)
+    probs = np.empty(num_prev_version)
+    probs.fill(1.0 / num_prev_version)
     ind = sample_from(probs)
-    nnengine2 = NNEngine("NNEngine", model, max(0, step - 1000 * ind))
+
+    m_step = int(list_prv_model[ind].split('/')[-1].split('-')[-1])
+
+    nnengine2 = NNEngine("NNEngine", model, m_step)
     board1 = Selfplay.run_self_play_game(nnengine, nnengine2)
 
-    nnengine = NNEngine("NNEngine", model, step)
-    nnengine2 = NNEngine("NNEngine", model, max(0, step - 1000 * ind))
+    nnengine.clear_board()
+    nnengine2.clear_board()
     board2 = Selfplay.run_self_play_game(nnengine2, nnengine)
 
     def get_feed(board, color):
@@ -140,35 +146,38 @@ def create_self_play_data(step, model, feature_planes, label_op, outcome_op):
         temp = Board(model.N)
         for x,y,dir in board.move_list:
             if temp.color_to_play == color:
-                feature = Features.make_feature_planes_1(temp, color)
-                label = np.zeros([model.N, model.N, temp.num_dirs], dtype=float)
-                label[x, y, dir] = 1
-                feed.append({feature_planes: feature,
-                             label_op: label,
-                             outcome_op: win})
 
+                feed.append({feature_planes: [Features.make_feature_planes_1(temp, color)],
+                                  label_op: [x*(temp.N+1)*temp.move_dirs + y*temp.move_dirs + dir],
+                                  outcome_op: [win]})
             temp.make_move(x, y, dir, temp.color_to_play)
+
+        return feed
 
     return get_feed(board1, Color.Black) + get_feed(board2, Color.White)
 
 
+
+
+
 def train_model(model, N, Nfeat, lr_base,
-                lr_half_life, max_steps, just_validate=False):
+                lr_half_life, max_steps, engine_strength, just_validate=False):
     with tf.Graph().as_default():
         # build the graph
         learning_rate_ph = tf.placeholder(tf.float32)
-        momentum_ph = tf.placeholder(tf.float32)
-        feature_planes = tf.placeholder(tf.float32, shape=[None, N, N, Nfeat])
+        grad_cap = tf.placeholder(tf.float32)
+        feature_planes = tf.placeholder(tf.float32, shape=[None, N + 1, N + 1, Nfeat])
 
-        model_outputs = model.inference(feature_planes, N, Nfeat)
+        model_outputs = model.inference(feature_planes, N + 1, Nfeat)
         cross_entropy_err, label_op, outcome_op = loss_func(model_outputs)
-        train_op = train_step(cross_entropy_err, learning_rate_ph, momentum_ph)
+        train_op, grads_vars_op, dir_grads_vars_op = train_step(cross_entropy_err, learning_rate_ph, outcome_op, grad_cap)
 
-        saver = tf.train.Saver(tf.trainable_variables(), max_to_keep=5, keep_checkpoint_every_n_hours=0.5)
+        saver = tf.train.Saver(tf.trainable_variables(), max_to_keep=50, keep_checkpoint_every_n_hours=0.5)
 
         init = tf.global_variables_initializer()
         sess = tf.Session(config=tf.ConfigProto(log_device_placement=False))
         sess.run(init)
+
 
         #summary_writer = tf.train.SummaryWriter(
         #    os.path.join(model.train_dir, 'summaries', datetime.now().strftime('%Y%m%d-%H%M%S')), graph=sess.graph,
@@ -178,23 +187,25 @@ def train_model(model, N, Nfeat, lr_base,
 
 
 
-
-
         last_training_loss = None
 
         if just_validate:  # Just run the validation set once
             step = Checkpoint.restore_from_checkpoint(sess, saver, model.train_dir)
-            run_validation(step)
+            run_validation(step, engine_strength)
         else:  # Run the training loop
-            # step = 0
-            step = Checkpoint.optionally_restore_from_checkpoint(sess, saver, os.path.join(model.train_dir, 'checkpoints'))
 
+            # step = 0
+            step = Checkpoint.optionally_restore_from_checkpoint(sess, saver, os.path.join(model.train_dir))
+            saver.save(sess, os.path.join(model.train_dir, "model.ckpt"), global_step=step)
+
+                #saver.save(sess, "/home/alanc/PycharmProjects/Fence/checkpoints/model.ckpt", global_step=0)
             # step = optionally_restore_from_checkpoint(sess, saver, model.train_dir)
             # print "WARNING: CHECKPOINTS TURNED OFF!!"
             print("WARNING: WILL STOP AFTER %d STEPS" % max_steps)
             print("lr_base = %f, lr_half_life = %f" % (lr_base, lr_half_life))
             # loader = NPZ.AsyncRandomizingLoader(train_data_dir, minibatch_size=128)
-            minibatch_size = 128
+
+            print("Step = ", step)
 
 
             # loader = NPZ.RandomizingLoader(train_data_dir, minibatch_size=128)
@@ -202,8 +213,17 @@ def train_model(model, N, Nfeat, lr_base,
             # loader = NPZ.SplittingRandomizingLoader(train_data_dir, Nsplit=2)
             last_step_ref_time = 0
             while True:
-                if step % 10000 == 0 and step != 0:
-                    run_validation(step)
+
+
+                #print("List of ckpts!!: ", saver.last_checkpoints)
+
+                if step % (2 * save_size) == 0 and step != 0:
+                    win_rate = run_validation(step, engine_strength)
+                    if (win_rate > 0.95) and (engine_strength >= 0.05):
+                        engine_strength = engine_strength - 0.05
+
+                if (step % 10 == 0):
+                    print("Step = ", step)
 
                 start_time = time.time()
                 # feed_dict = build_feed_dict(loader, normalization, feature_planes, outputs_ph)
@@ -212,7 +232,7 @@ def train_model(model, N, Nfeat, lr_base,
                 #feed_dict = batch_queue.next_feed_dict()
 
                 # feed_dict = self-play games + make label array
-                feed_dict = create_self_play_data(step, model, feature_planes, label_op, outcome_op)
+                feed_dict = create_self_play_data(model, feature_planes, label_op, outcome_op, saver.last_checkpoints)
 
                 load_time = time.time() - start_time
 
@@ -227,18 +247,34 @@ def train_model(model, N, Nfeat, lr_base,
                     #summary_writer.add_summary(make_summary('learningrate', learning_rate), step)
                     #summary_writer.add_summary(make_summary('momentum', momentum), step)
 
-                feed_dict[learning_rate_ph] = learning_rate
-                feed_dict[momentum_ph] = momentum
-
                 start_time = time.time()
-                _, loss_value, outputs_value = sess.run([train_op, cross_entropy_err, model_outputs],
-                                                                        feed_dict=feed_dict)
+
+                for feed in feed_dict:
+                    feed[learning_rate_ph] = learning_rate
+                    feed[grad_cap] = learning_rate * 0.5
+                    _, loss_value= sess.run(
+                                            [train_op, cross_entropy_err],
+                                            feed_dict=feed)
+
+
+                # feed_dict[learning_rate_ph] = learning_rate
+                # feed_dict[momentum_ph] = momentum
+                #
+                # _, loss_value, outputs_value, grads_vars, dir_grads_vars, outcome = sess.run([train_op, cross_entropy_err, model_outputs,
+                #                                          grads_vars_op, dir_grads_vars_op, outcome_op],
+                #                                                             feed_dict=feed_dict)
                 train_time = time.time() - start_time
 
+                # print("Loss: ", loss_value)
+                # print("Grad vars: ", np.shape(grads_vars))
+                #print("Max dir grad vars: ", max(dir_grads_vars))
+                # print("Outcome: ", outcome)
+                #
+                # return
+
                 if np.isnan(loss_value):
-                    print
-                    "Model diverged with loss = Nan"
-                    return
+                    print("Model diverged with loss = Nan")
+                    #return
                 # assert not np.isnan(loss_value), 'Model diverged with loss = NaN'
 
                 if step >= max_steps:
@@ -251,29 +287,33 @@ def train_model(model, N, Nfeat, lr_base,
                 full_step_time = time.time() - last_step_ref_time
                 last_step_ref_time = time.time()
 
-                if step % 1 == 0:
-                    minibatch_size = feed_dict[feature_planes].shape[0]
-                    examples_per_sec = minibatch_size / full_step_time
-                    print
-                    "%s: step %d, lr=%.6f, mom=%.2f, loss = %.4f, (mb_size=%d, %.1f examples/sec), (load=%.3f train=%.3f total=%0.3f sec/step)" % \
-                    (datetime.now(), step, learning_rate, momentum, loss_value, minibatch_size,
-                     examples_per_sec, load_time, train_time, full_step_time)
+                if step % 10 == 0:
+                    #minibatch_size = feed_dict[feature_planes].shape[0]
+                    #examples_per_sec = minibatch_size / full_step_time
+                    print("%s: step %d, lr=%.6f, gd_cp=%.6f, loss = %.4f, (load=%.3f train=%.3f total=%0.3f sec/step)" % \
+                    (datetime.now(), step, learning_rate, learning_rate * 0.5, loss_value,
+                        load_time, train_time, full_step_time))
+                    #print("Output values: ", np.array(outputs_value).shape, outputs_value)
                     #if step % 10 == 0:
                         #summary_writer.add_summary(make_summary('examples/sec', examples_per_sec), step)
                         #summary_writer.add_summary(make_summary('step', step), step)
 
-                if step % 1000 == 0 and step != 0:
-                    # print "WARNING: CHECKPOINTS TURNED OFF!!"
-                    saver.save(sess, os.path.join(model.train_dir, "checkpoints", "model.ckpt"), global_step=step)
-
                 step += 1
+
+                if step % save_size == 0 and step != 0:
+                    # print "WARNING: CHECKPOINTS TURNED OFF!!"
+                    saver.save(sess, os.path.join(model.train_dir, "model.ckpt"), global_step=step)
+                    #saver.set_last_checkpoints(last_checkpoints=saver.last_checkpoints + [last_check_points])
+
+
+
 
 
 if __name__ == "__main__":
     N = 5
     # Nfeat = 15
     # Nfeat = 21
-    Nfeat = 11
+    Nfeat = 9
 
     """
     #model = Models.Conv6PosDep(N, Nfeat) 
@@ -298,7 +338,7 @@ if __name__ == "__main__":
     """
 
     # model = EvalModels.Conv5PosDepFC1ELU(N, Nfeat)
-    model = NNModels.Conv12PosDepELU(N, Nfeat)
+    model = NNModels.Conv5PosDepELU(N, Nfeat)
     # model = EvalModels.Zero(N, Nfeat)
     # model = EvalModels.Linear(N, Nfeat)
     # train_data_dir = "/home/greg/coding/ML/go/NN/data/KGS/eval_examples/stones_4lib_4hist_ko_4cap_Nf21/train"
@@ -331,9 +371,11 @@ if __name__ == "__main__":
     #    #for lr_base in [0.01, 0.003, 0.001, 0.0003]:
     #    #lr_base = 0.008
     #    lr_base = 0.002 # seems to be the highest useful learning rate for eval_conv11fc1
-    lr_base = 0.002
+    #lr_base = 0.001
+    lr_base = 0.00006
     lr_half_life = 1e5  # 3e4
     max_steps = 1e9
+    engine_strength = 1.0
     train_model(model, N, Nfeat, lr_base,
-                lr_half_life, max_steps, just_validate=False)
+                lr_half_life, max_steps, engine_strength, just_validate=False)
 
