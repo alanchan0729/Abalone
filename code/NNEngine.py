@@ -24,8 +24,8 @@ def sample_from(probs):
     for i in range(len(probs)):
         if r <= cumsum[i]:
             return i
-    print("Prob2: ", probs)
-    assert False, "problem with sample_from"
+    #print("Prob2: ", probs)
+    #assert False, "problem with sample_from"
 
 
 class NNEngine(BaseEngine):
@@ -66,7 +66,6 @@ class NNEngine(BaseEngine):
 
     def pick_model_move(self, color):
 
-
         if (self.model.Nfeat == 9):
             board_feature_planes = Features.make_feature_planes_1(self.board, color)
         else:
@@ -77,14 +76,18 @@ class NNEngine(BaseEngine):
 
         feed_dict = {self.feature_planes: [board_feature_planes]}
 
-        logit_batch = self.sess.run(self.logits, feed_dict)
+        logit_batch = self.sess.run(self.logits, feed_dict=feed_dict)
+        logit_batch = logit_batch[0]
+        #print(logit_batch)
+
+
         #move_logits = Symmetry.average_plane_over_symmetries(logit_batch, self.model.N)
-        move_logits = logit_batch.reshape(((self.model.N+1)*(self.model.N+1)*self.board.move_dirs))
+        #move_logits = logit_batch.reshape(((self.model.N+1)*(self.model.N+1)*self.board.move_dirs))
 
-        move_logits = softmax(move_logits, 1.0)
+        soft_max_temp = 0.6
+        move_logits = softmax(logit_batch, soft_max_temp)
 
-        #if (self.board.empty_edges == 8):
-        #    print("Move 1:\n", move_logits)
+        #print("Move 1:\n", move_logits)
 
         # zero out illegal moves
         for x in range(self.model.N + 1):
@@ -94,7 +97,7 @@ class NNEngine(BaseEngine):
                     if not self.board.play_is_legal(x, y, d, color):
                         move_logits[ind] = 0
 
-        #print("move probs = ", move_probs)
+        #print("Move 2 = \n", move_logits)
         sum_probs = np.sum(move_logits)
 
         if (sum_probs > (1e-10)):

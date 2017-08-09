@@ -19,7 +19,7 @@ def restore_from_checkpoint(sess, saver, ckpt_dir, step=None):
 
         path = ckpt.model_checkpoint_path[0: ckpt.model_checkpoint_path.index('-') + 1] + str(step)
 
-        #print("path: ",path)
+        print("path: ",path)
         saver.restore(sess, path)
         #print("Restored from checkpoint %d" % step)
         return step

@@ -21,8 +21,8 @@ import Selfplay
 from Engine import *
 from NNEngine import *
 from Board import *
+import SelfPlayGenerator
 
-save_size = 150
 
 def train_step(total_loss, learning_rate, outcome_op, grad_cap):
     #return tf.train.MomentumOptimizer(learning_rate, momentum).minimize(total_loss)
@@ -41,23 +41,6 @@ def train_step(total_loss, learning_rate, outcome_op, grad_cap):
 
 def make_summary(name, val):
     return summary_pb2.Summary(value=[summary_pb2.Summary.Value(tag=name, simple_value=val)])
-
-
-def read_float_from_file(filename, default):
-    try:
-        with open(filename, 'r') as f:
-            x = float(f.read().strip())
-            return x
-    except:
-        print
-        "failed to read from file", filename, "; using default value", default
-        return default
-
-
-def append_line_to_file(filename, s):
-    with open(filename, 'a') as f:
-        f.write(s)
-        f.write('\n')
 
 
 class MovingAverage:
@@ -115,53 +98,11 @@ def run_validation(step, engine_strength):
     return (win / num_games)
 
 
-def create_self_play_data(model, feature_planes, label_op, outcome_op, list_prv_model):
-
-
-
-    feed_dict = []
-    cur_step = int(list_prv_model[-1].split('/')[-1].split('-')[-1])
-    nnengine = NNEngine("NNEngine", model, cur_step)
-    num_prev_version = len(list_prv_model)
-    probs = np.empty(num_prev_version)
-    probs.fill(1.0 / num_prev_version)
-    ind = sample_from(probs)
-
-    m_step = int(list_prv_model[ind].split('/')[-1].split('-')[-1])
-
-    nnengine2 = NNEngine("NNEngine", model, m_step)
-    board1 = Selfplay.run_self_play_game(nnengine, nnengine2)
-
-    nnengine.clear_board()
-    nnengine2.clear_board()
-    board2 = Selfplay.run_self_play_game(nnengine2, nnengine)
-
-    def get_feed(board, color):
-        feed = []
-        if (board.score[color] > board.score[flipped_color[color]]):
-            win = 1
-        else:
-            win = -1
-
-        temp = Board(model.N)
-        for x,y,dir in board.move_list:
-            if temp.color_to_play == color:
-
-                feed.append({feature_planes: [Features.make_feature_planes_1(temp, color)],
-                                  label_op: [x*(temp.N+1)*temp.move_dirs + y*temp.move_dirs + dir],
-                                  outcome_op: [win]})
-            temp.make_move(x, y, dir, temp.color_to_play)
-
-        return feed
-
-    return get_feed(board1, Color.Black) + get_feed(board2, Color.White)
-
-
 
 
 
 def train_model(model, N, Nfeat, lr_base,
-                lr_half_life, max_steps, engine_strength, just_validate=False):
+                lr_half_life, max_steps, minibatch_size, engine_strength, just_validate=False):
     with tf.Graph().as_default():
         # build the graph
         learning_rate_ph = tf.placeholder(tf.float32)
@@ -177,6 +118,7 @@ def train_model(model, N, Nfeat, lr_base,
         init = tf.global_variables_initializer()
         sess = tf.Session(config=tf.ConfigProto(log_device_placement=False))
         sess.run(init)
+        #print("sess ", sess)
 
 
         #summary_writer = tf.train.SummaryWriter(
@@ -205,7 +147,7 @@ def train_model(model, N, Nfeat, lr_base,
             print("lr_base = %f, lr_half_life = %f" % (lr_base, lr_half_life))
             # loader = NPZ.AsyncRandomizingLoader(train_data_dir, minibatch_size=128)
 
-            print("Step = ", step)
+            batch_queue = SelfPlayGenerator.AsyncRandomGamePlayQueue()
 
 
             # loader = NPZ.RandomizingLoader(train_data_dir, minibatch_size=128)
@@ -217,65 +159,52 @@ def train_model(model, N, Nfeat, lr_base,
 
                 #print("List of ckpts!!: ", saver.last_checkpoints)
 
-                if step % (2 * save_size) == 0 and step != 0:
+                if step % (2 * minibatch_size) == 0 and step != 0:
                     win_rate = run_validation(step, engine_strength)
                     if (win_rate > 0.95) and (engine_strength >= 0.05):
                         engine_strength = engine_strength - 0.05
 
-                if (step % 10 == 0):
-                    print("Step = ", step)
 
-                start_time = time.time()
-                # feed_dict = build_feed_dict(loader, normalization, feature_planes, outputs_ph)
-
-
-                #feed_dict = batch_queue.next_feed_dict()
-
-                # feed_dict = self-play games + make label array
-                feed_dict = create_self_play_data(model, feature_planes, label_op, outcome_op, saver.last_checkpoints)
-
-                load_time = time.time() - start_time
-
-                if step % 1 == 0:
-                    # learning_rate = read_float_from_file('../work/lr.txt', default=0.1)
-                    # momentum = read_float_from_file('../work/momentum.txt', default=0.9)
-                    if step < 100:
-                        learning_rate = 0.0003  # to stabilize initially
-                    else:
-                        learning_rate = lr_base * 0.5 ** (float(step - 100) / lr_half_life)
-                    momentum = 0.9
-                    #summary_writer.add_summary(make_summary('learningrate', learning_rate), step)
-                    #summary_writer.add_summary(make_summary('momentum', momentum), step)
+                print("Step = ", step)
 
                 start_time = time.time()
 
-                for feed in feed_dict:
-                    feed[learning_rate_ph] = learning_rate
-                    feed[grad_cap] = learning_rate * 0.5
-                    _, loss_value= sess.run(
-                                            [train_op, cross_entropy_err],
-                                            feed_dict=feed)
+                checkpoint_paths = saver.last_checkpoints
+                versions = [int(checkpoint_paths[ind].split('/')[-1].split('-')[-1]) for ind in
+                            range(len(checkpoint_paths))]
+
+                batch_queue.start_gen_game_play(feature_planes, label_op, outcome_op, minibatch_size, versions, model)
 
 
-                # feed_dict[learning_rate_ph] = learning_rate
-                # feed_dict[momentum_ph] = momentum
-                #
+                if step < 100:
+                    learning_rate = 0.0003  # to stabilize initially
+                else:
+                    learning_rate = lr_base * 0.5 ** (float(step - 100) / lr_half_life)
+                #summary_writer.add_summary(make_summary('learningrate', learning_rate), step)
+                #summary_writer.add_summary(make_summary('momentum', momentum), step)
+
+                mean_loss = 0.0
+                counter = 0
+
+                while True:
+                    feed_dict = batch_queue.next_feed_dict()
+                    if (feed_dict == None):
+                        break
+                    feed_dict[learning_rate_ph] = learning_rate
+                    feed_dict[grad_cap] = learning_rate * 0.5
+                    _, loss_value = sess.run(
+                        [train_op, cross_entropy_err],
+                        feed_dict=feed_dict)
+                    mean_loss += loss_value
+                    counter += 1
+
+                mean_loss /= counter
+
+
                 # _, loss_value, outputs_value, grads_vars, dir_grads_vars, outcome = sess.run([train_op, cross_entropy_err, model_outputs,
                 #                                          grads_vars_op, dir_grads_vars_op, outcome_op],
                 #                                                             feed_dict=feed_dict)
                 train_time = time.time() - start_time
-
-                # print("Loss: ", loss_value)
-                # print("Grad vars: ", np.shape(grads_vars))
-                #print("Max dir grad vars: ", max(dir_grads_vars))
-                # print("Outcome: ", outcome)
-                #
-                # return
-
-                if np.isnan(loss_value):
-                    print("Model diverged with loss = Nan")
-                    #return
-                # assert not np.isnan(loss_value), 'Model diverged with loss = NaN'
 
                 if step >= max_steps:
                     return
@@ -290,17 +219,17 @@ def train_model(model, N, Nfeat, lr_base,
                 if step % 10 == 0:
                     #minibatch_size = feed_dict[feature_planes].shape[0]
                     #examples_per_sec = minibatch_size / full_step_time
-                    print("%s: step %d, lr=%.6f, gd_cp=%.6f, loss = %.4f, (load=%.3f train=%.3f total=%0.3f sec/step)" % \
-                    (datetime.now(), step, learning_rate, learning_rate * 0.5, loss_value,
-                        load_time, train_time, full_step_time))
+                    print("%s: step %d, lr=%.6f, gd_cp=%.6f, loss = %.4f, (train=%.3f sec/ %d step)" % \
+                    (datetime.now(), step, learning_rate, learning_rate * 0.5, mean_loss,
+                        train_time, minibatch_size))
                     #print("Output values: ", np.array(outputs_value).shape, outputs_value)
                     #if step % 10 == 0:
                         #summary_writer.add_summary(make_summary('examples/sec', examples_per_sec), step)
                         #summary_writer.add_summary(make_summary('step', step), step)
 
-                step += 1
+                step += minibatch_size
 
-                if step % save_size == 0 and step != 0:
+                if step % minibatch_size == 0 and step != 0:
                     # print "WARNING: CHECKPOINTS TURNED OFF!!"
                     saver.save(sess, os.path.join(model.train_dir, "model.ckpt"), global_step=step)
                     #saver.set_last_checkpoints(last_checkpoints=saver.last_checkpoints + [last_check_points])
@@ -372,10 +301,11 @@ if __name__ == "__main__":
     #    #lr_base = 0.008
     #    lr_base = 0.002 # seems to be the highest useful learning rate for eval_conv11fc1
     #lr_base = 0.001
-    lr_base = 0.00006
+    lr_base = 0.0001
     lr_half_life = 1e5  # 3e4
     max_steps = 1e9
+    minibatch_size = 20
     engine_strength = 1.0
     train_model(model, N, Nfeat, lr_base,
-                lr_half_life, max_steps, engine_strength, just_validate=False)
+                lr_half_life, max_steps, minibatch_size, engine_strength, just_validate=False)
 

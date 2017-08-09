@@ -31,6 +31,7 @@ class Board:
         self.clear()
 
     def clear(self):
+
         self.edges = np.empty((self.N + 1, self.N + 1, 2), dtype=np.int8)
         self.edges.fill(State.Empty)
         self.empty_edges = self.N * (self.N + 1) * 2

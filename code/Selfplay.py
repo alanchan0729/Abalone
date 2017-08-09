@@ -6,8 +6,8 @@ from Engine import IdiotEngine, StrongerEngine
 # Use the position immediately after the random move together with the final
 # game result as a single training example for the value network.
 
-def run_self_play_game(engine1, engine2, N=5, show=False):
-    board = Board(N)
+def run_self_play_game(engine1, engine2, show=False):
+    board = Board(engine1.board.N)
 
     engine1.clear_board()
     engine2.clear_board()
