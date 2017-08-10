@@ -53,7 +53,7 @@ class IdiotEngine(BaseEngine):
     def version(self):
         return "1.0"
 
-    def pick_move(self, color):
+    def pick_move(self, color, show=False, pick_best=False):
         moves = []
         for x in range(self.board.N + 1):
             for y in range(self.board.N + 1):
@@ -74,7 +74,7 @@ class StrongerEngine(BaseEngine):
     def version(self):
         return "1.0"
 
-    def pick_move(self, color):
+    def pick_move(self, color, show=False, pick_best=False):
         point_moves = []
         def_moves = []
         other_moves = []

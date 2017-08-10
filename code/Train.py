@@ -31,7 +31,8 @@ def train_step(total_loss, learning_rate, outcome_op, grad_cap):
     grads_vars = opt.compute_gradients(total_loss, tf.trainable_variables())
     outcome = tf.reduce_mean(outcome_op)
 
-    dir_grads_vars = [(tf.multiply(tf.clip_by_value(grad, -grad_cap, grad_cap), outcome), var) for grad, var in grads_vars]
+    #dir_grads_vars = [(tf.multiply(tf.clip_by_value(grad, -grad_cap, grad_cap), outcome), var) for grad, var in grads_vars]
+    dir_grads_vars = [(grad * outcome, var) for grad, var in grads_vars]
 
 
     #dir_grads_vars = [[tf.multiply(gv[0], outcome), gv[1]] for gv in grads_vars]
@@ -39,39 +40,12 @@ def train_step(total_loss, learning_rate, outcome_op, grad_cap):
     return opt.apply_gradients(dir_grads_vars), grads_vars, dir_grads_vars
 
 
-def make_summary(name, val):
-    return summary_pb2.Summary(value=[summary_pb2.Summary.Value(tag=name, simple_value=val)])
-
-
-class MovingAverage:
-    def __init__(self, name, time_constant):
-        self.name = name
-        self.time_constant = time_constant
-        self.num_samples = 0
-        self.avg = 0.0
-        self.last_sample = 0
-
-    def add(self, sample):
-        sample = float(sample)
-        self.num_samples += 1
-        weight = 1.0 / min(self.num_samples, self.time_constant)
-        self.avg = weight * sample + (1 - weight) * self.avg
-        self.last_sample = sample
-
-    def write(self, summary_writer, step):
-        summary_writer.add_summary(make_summary(self.name + ' (avg)', self.avg), step)
-        summary_writer.add_summary(make_summary(self.name + ' (raw)', self.last_sample), step)
-
-
-
-def loss_func(output_op):
-    label_op = tf.placeholder(tf.int64, shape=[None])
-    outcome_op = tf.placeholder(tf.float32, shape=[None])
+def loss_func(output_op, label_op):
 
     cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=output_op, labels=label_op)
     cross_entropy_err = tf.reduce_mean(cross_entropy, name='cross_entropy_mean')
 
-    return cross_entropy_err, label_op, outcome_op
+    return cross_entropy_err
 
 
 def run_validation(step, engine_strength):
@@ -85,12 +59,16 @@ def run_validation(step, engine_strength):
     for i in range(num_games):
         nnengine.clear_board()
         stronger_engine.clear_board()
+        show = False
+        #if (i == 30):
+        #    show = True
+
         if (i % 2 == 0):
-            board = Selfplay.run_self_play_game(nnengine, stronger_engine)
+            board = SelfPlayGenerator.run_self_play_game(nnengine, stronger_engine, show=show, pick_best=True)
             if (board.score[Color.Black] > board.score[Color.White]):
                 win = win + 1
         else:
-            board = Selfplay.run_self_play_game(stronger_engine, nnengine)
+            board = SelfPlayGenerator.run_self_play_game(stronger_engine, nnengine, pick_best=True)
             if (board.score[Color.Black] < board.score[Color.White]):
                 win = win + 1
     print("Play against %s: %d/%d" % (stronger_engine.name(), win, num_games))
@@ -110,23 +88,16 @@ def train_model(model, N, Nfeat, lr_base,
         feature_planes = tf.placeholder(tf.float32, shape=[None, N + 1, N + 1, Nfeat])
 
         model_outputs = model.inference(feature_planes, N + 1, Nfeat)
-        cross_entropy_err, label_op, outcome_op = loss_func(model_outputs)
+        label_op = tf.placeholder(tf.int64, shape=[None])
+        outcome_op = tf.placeholder(tf.float32, shape=[None])
+        cross_entropy_err = loss_func(model_outputs, label_op)
         train_op, grads_vars_op, dir_grads_vars_op = train_step(cross_entropy_err, learning_rate_ph, outcome_op, grad_cap)
 
-        saver = tf.train.Saver(tf.trainable_variables(), max_to_keep=50, keep_checkpoint_every_n_hours=0.5)
+        saver = tf.train.Saver(tf.trainable_variables(), max_to_keep=800, keep_checkpoint_every_n_hours=0.5)
 
         init = tf.global_variables_initializer()
         sess = tf.Session(config=tf.ConfigProto(log_device_placement=False))
         sess.run(init)
-        #print("sess ", sess)
-
-
-        #summary_writer = tf.train.SummaryWriter(
-        #    os.path.join(model.train_dir, 'summaries', datetime.now().strftime('%Y%m%d-%H%M%S')), graph=sess.graph,
-        #    flush_secs=5)
-        #accuracy_avg = MovingAverage('accuracy', time_constant=1000)
-        #total_loss_avg = MovingAverage('total_loss', time_constant=1000)
-
 
 
         last_training_loss = None
@@ -140,32 +111,21 @@ def train_model(model, N, Nfeat, lr_base,
             step = Checkpoint.optionally_restore_from_checkpoint(sess, saver, os.path.join(model.train_dir))
             saver.save(sess, os.path.join(model.train_dir, "model.ckpt"), global_step=step)
 
-                #saver.save(sess, "/home/alanc/PycharmProjects/Fence/checkpoints/model.ckpt", global_step=0)
-            # step = optionally_restore_from_checkpoint(sess, saver, model.train_dir)
-            # print "WARNING: CHECKPOINTS TURNED OFF!!"
+
             print("WARNING: WILL STOP AFTER %d STEPS" % max_steps)
             print("lr_base = %f, lr_half_life = %f" % (lr_base, lr_half_life))
             # loader = NPZ.AsyncRandomizingLoader(train_data_dir, minibatch_size=128)
 
             batch_queue = SelfPlayGenerator.AsyncRandomGamePlayQueue()
 
-
-            # loader = NPZ.RandomizingLoader(train_data_dir, minibatch_size=128)
-            # loader = NPZ.GroupingRandomizingLoader(train_data_dir, Ngroup=1)
-            # loader = NPZ.SplittingRandomizingLoader(train_data_dir, Nsplit=2)
             last_step_ref_time = 0
             while True:
 
 
-                #print("List of ckpts!!: ", saver.last_checkpoints)
-
-                if step % (2 * minibatch_size) == 0 and step != 0:
+                if step % (10 * minibatch_size) == 0 and step != 0:
                     win_rate = run_validation(step, engine_strength)
-                    if (win_rate > 0.95) and (engine_strength >= 0.05):
+                    if (win_rate > 0.90) and (engine_strength >= 0.05):
                         engine_strength = engine_strength - 0.05
-
-
-                print("Step = ", step)
 
                 start_time = time.time()
 
@@ -179,7 +139,7 @@ def train_model(model, N, Nfeat, lr_base,
                 if step < 100:
                     learning_rate = 0.0003  # to stabilize initially
                 else:
-                    learning_rate = lr_base * 0.5 ** (float(step - 100) / lr_half_life)
+                    learning_rate = lr_base * 0.5 ** (float(step - 110000) / lr_half_life)
                 #summary_writer.add_summary(make_summary('learningrate', learning_rate), step)
                 #summary_writer.add_summary(make_summary('momentum', momentum), step)
 
@@ -191,15 +151,28 @@ def train_model(model, N, Nfeat, lr_base,
                     if (feed_dict == None):
                         break
                     feed_dict[learning_rate_ph] = learning_rate
-                    feed_dict[grad_cap] = learning_rate * 0.5
+                    feed_dict[grad_cap] = learning_rate * 1.0
                     _, loss_value = sess.run(
                         [train_op, cross_entropy_err],
                         feed_dict=feed_dict)
+
+                    # _, loss_value, model_out, label_out = sess.run(
+                    #     [train_op, cross_entropy_err, model_outputs, label_op],
+                    #     feed_dict=feed_dict)
+                    #
+                    # e_x = np.exp(model_out - np.max(model_out))
+                    # e_x = e_x / e_x.sum()
+                    # print("Model out: \n", e_x)
+                    # print("True out: \n", label_out)
+                    # print("Loss: ", loss_value)
+                    #
+                    # if (loss_value > 30):
+                    #     return
+
                     mean_loss += loss_value
                     counter += 1
 
                 mean_loss /= counter
-
 
                 # _, loss_value, outputs_value, grads_vars, dir_grads_vars, outcome = sess.run([train_op, cross_entropy_err, model_outputs,
                 #                                          grads_vars_op, dir_grads_vars_op, outcome_op],
@@ -217,22 +190,14 @@ def train_model(model, N, Nfeat, lr_base,
                 last_step_ref_time = time.time()
 
                 if step % 10 == 0:
-                    #minibatch_size = feed_dict[feature_planes].shape[0]
-                    #examples_per_sec = minibatch_size / full_step_time
-                    print("%s: step %d, lr=%.6f, gd_cp=%.6f, loss = %.4f, (train=%.3f sec/ %d step)" % \
-                    (datetime.now(), step, learning_rate, learning_rate * 0.5, mean_loss,
+                    print("%s: step %d, lr=%f, loss = %.2f, (train=%.3f s/%d)" % \
+                    (datetime.now(), step, learning_rate, mean_loss,
                         train_time, minibatch_size))
-                    #print("Output values: ", np.array(outputs_value).shape, outputs_value)
-                    #if step % 10 == 0:
-                        #summary_writer.add_summary(make_summary('examples/sec', examples_per_sec), step)
-                        #summary_writer.add_summary(make_summary('step', step), step)
 
                 step += minibatch_size
 
                 if step % minibatch_size == 0 and step != 0:
-                    # print "WARNING: CHECKPOINTS TURNED OFF!!"
                     saver.save(sess, os.path.join(model.train_dir, "model.ckpt"), global_step=step)
-                    #saver.set_last_checkpoints(last_checkpoints=saver.last_checkpoints + [last_check_points])
 
 
 
@@ -301,8 +266,8 @@ if __name__ == "__main__":
     #    #lr_base = 0.008
     #    lr_base = 0.002 # seems to be the highest useful learning rate for eval_conv11fc1
     #lr_base = 0.001
-    lr_base = 0.0001
-    lr_half_life = 1e5  # 3e4
+    lr_base =  0.0000015
+    lr_half_life = 5e5  # 3e4
     max_steps = 1e9
     minibatch_size = 20
     engine_strength = 1.0
